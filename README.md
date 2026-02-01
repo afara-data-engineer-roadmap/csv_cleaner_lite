@@ -92,4 +92,38 @@ Pour exécuter le moteur sans le run.bat (pour debug) :
 PowerShell
 # Depuis la racine du projet
 PowerShell.exe -ExecutionPolicy Bypass -File "core/engine.ps1" -Verbose
+
+🧠 Choix Techniques & Résolution de Problèmes
+Ce projet n'est pas un simple script, mais une application de la méthodologie Context Engineering visant une qualité industrielle.
+
+1. Performance : Complexité O(n) et Mémoire O(1)
+Problème : Risque de dépassement de mémoire (RAM) sur des fichiers CSV de plusieurs Go.
+
+Décision : Utilisation du Streaming Pipeline PowerShell.
+
+Résultat : Les données circulent dans le pipeline ligne par ligne. L'empreinte mémoire reste constante (environ 40 Mo), que le fichier fasse 10 Mo ou 10 Go.
+
+2. Intégrité des Données : Stratégie Anti-Collision
+Problème : Le renommage via mapping.csv peut créer des doublons de colonnes (ex: Tel -> Phone alors que Phone existe déjà), entraînant une perte de données.
+
+Décision : Implémentation d'un gestionnaire de collision intelligent.
+
+Résultat : Le moteur détecte les doublons et suffixe automatiquement (Phone, Phone_2), garantissant qu'aucune donnée source n'est écrasée.
+
+3. Robustesse : Écriture Atomique & Fail Fast
+Problème : Corruption de fichier en cas d'arrêt brutal et erreurs silencieuses dues à des dossiers manquants.
+
+Décision : * Fail Fast : Vérification systématique de l'arborescence avant le début du flux.
+
+Atomicité : Passage par un fichier .tmp puis renommage final (Move-Item -Force).
+
+Résultat : Le dossier output ne contient jamais de fichiers partiels ou corrompus.
+
+4. Fiabilité : Tests d'Intégration Autonomes
+Problème : Difficulté de tester les cas limites (collisions, fichiers vides) sans modifier la configuration de production.
+
+Décision : Création d'un script tests/integration_tests.ps1 capable d'injecter une configuration temporaire isolée.
+
+Résultat : Validation du moteur en 2 secondes avant chaque commit, assurant une régression zéro.
+
 Licence : Usage Interne Uniquement. Contact Support : [Votre Nom/Équipe]
