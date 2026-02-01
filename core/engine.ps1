@@ -1,182 +1,175 @@
 <#
-engine.ps1 — csv_cleaner_lite (Engine)
-Version: 1.4 (Final - Delimiter Support Restored)
-#>
+.SYNOPSIS
+    Moteur de nettoyage CSV pour CSV Cleaner Lite.
+    Applique le mapping d'en-têtes et gère les doublons de colonnes.
 
+.DESCRIPTION
+    Lit les configurations JSON et CSV.
+    Traite les fichiers du dossier input en streaming.
+    Gère les collisions de noms de colonnes via suffixe.
+    Écrit de manière atomique (.tmp -> .csv).
+
+.NOTES
+    Version: 1.0
+    Standards: 2.4 (Idempotent & Data Safe)
+#>
 [CmdletBinding()]
-param (
-    [Parameter(Mandatory = $false)]
-    [switch]$WhatIf
-)
+param()
 
 $ErrorActionPreference = 'Stop'
 
-function Assert-DirectoryExists {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Label
-    )
-    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-        throw "Fail Fast: dossier introuvable ($Label) : '$Path'"
-    }
-}
-
-function Assert-FileExists {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Label
-    )
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        throw "Fail Fast: fichier introuvable ($Label) : '$Path'"
-    }
-}
-
-function Get-ResolvedMappingTarget {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)][hashtable]$Mapping,
-        [Parameter(Mandatory = $true)][string]$SourceName
-    )
-    if ($Mapping.ContainsKey($SourceName) -and -not [string]::IsNullOrWhiteSpace([string]$Mapping[$SourceName])) {
-        return [string]$Mapping[$SourceName]
-    }
-    return $SourceName
-}
-
-function Get-UniqueName {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)][hashtable]$UsedNames,
-        [Parameter(Mandatory = $true)][string]$Candidate
-    )
-    if (-not $UsedNames.ContainsKey($Candidate)) {
-        $UsedNames[$Candidate] = $true
-        return $Candidate
-    }
-    $Index = 2
-    while ($true) {
-        $Alt = "{0}_{1}" -f $Candidate, $Index
-        if (-not $UsedNames.ContainsKey($Alt)) {
-            $UsedNames[$Alt] = $true
-            return $Alt
-        }
-        $Index++
-    }
-}
-
 try {
-    # --- Pathing & anchoring ---
-    $ProjectRoot = Split-Path -Parent $PSScriptRoot
-    $ConfigPath  = Join-Path $ProjectRoot 'config\settings.json'
+    # -------------------------------------------------------------------------
+    # 1. INITIALISATION & PATHING
+    # -------------------------------------------------------------------------
+    Write-Verbose "Initialisation de l'environnement..."
 
-    Write-Verbose "ProjectRoot: $ProjectRoot"
-    Assert-FileExists -Path $ConfigPath -Label 'settings.json'
+    # Ancrage au script et calcul de la racine du projet
+    $ScriptPath = $PSScriptRoot
+    $ProjectRoot = Split-Path -Parent $ScriptPath
 
-    # --- Load settings.json ---
-    $Settings = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
-
-    $DefaultInputPath  = Join-Path $ProjectRoot 'Input'
-    $DefaultOutputPath = Join-Path $ProjectRoot 'Output'
-
-    # Fallback robuste pour les dossiers
-    $InputPath  = if ($Settings.PSObject.Properties.Name -contains 'InputFolder'  -and $Settings.InputFolder)  { [string]$Settings.InputFolder }  else { $DefaultInputPath }
-    $OutputPath = if ($Settings.PSObject.Properties.Name -contains 'OutputFolder' -and $Settings.OutputFolder) { [string]$Settings.OutputFolder } else { $DefaultOutputPath }
+    # Définition des chemins absolus selon l'Architecture
+    $ConfigDir  = Join-Path -Path $ProjectRoot -ChildPath "config"
+    $InputDir   = Join-Path -Path $ProjectRoot -ChildPath "data\input"
+    $OutputDir  = Join-Path -Path $ProjectRoot -ChildPath "data\output"
     
-    # --- FIX: Récupération du Délimiteur ---
-    $Delimiter = if ($Settings.PSObject.Properties.Name -contains 'CsvDelimiter') { [string]$Settings.CsvDelimiter } else { ',' }
+    $SettingsPath = Join-Path -Path $ConfigDir -ChildPath "settings.json"
+    $MappingPath  = Join-Path -Path $ConfigDir -ChildPath "mapping.csv"
 
-    # Ancrage des chemins relatifs
-    if (-not [System.IO.Path]::IsPathRooted($InputPath))  { $InputPath  = Join-Path $ProjectRoot $InputPath }
-    if (-not [System.IO.Path]::IsPathRooted($OutputPath)) { $OutputPath = Join-Path $ProjectRoot $OutputPath }
-
-    # mapping.csv : logique de recherche
-    $MappingCandidates = @()
-    if ($Settings.PSObject.Properties.Name -contains 'MappingFile' -and $Settings.MappingFile) {
-        $Candidate = [string]$Settings.MappingFile
-        if (-not [System.IO.Path]::IsPathRooted($Candidate)) { $Candidate = Join-Path $ProjectRoot $Candidate }
-        $MappingCandidates += $Candidate
-    }
-    $MappingCandidates += (Join-Path $ProjectRoot 'config\mapping.csv')
-    $MappingCandidates += (Join-Path $ProjectRoot 'mapping.csv')
-
-    $MappingPath = $null
-    foreach ($Candidate in $MappingCandidates) {
-        if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
-            $MappingPath = $Candidate
-            break
+    # Fail Fast : Vérification des dossiers et fichiers critiques
+    $CriticalPaths = @($ConfigDir, $InputDir, $OutputDir, $SettingsPath, $MappingPath)
+    foreach ($Path in $CriticalPaths) {
+        if (-not (Test-Path -Path $Path)) {
+            Throw "Ressource critique manquante : $Path"
         }
     }
-    if (-not $MappingPath) {
-        throw "Fail Fast: mapping.csv introuvable."
+
+    # -------------------------------------------------------------------------
+    # 2. CHARGEMENT DE LA CONFIGURATION
+    # -------------------------------------------------------------------------
+    Write-Verbose "Chargement de la configuration..."
+
+    # Lecture Settings (JSON) pour le délimiteur
+    try {
+        $JsonContent = Get-Content -Path $SettingsPath -Raw -ErrorAction Stop
+        $Settings = $JsonContent | ConvertFrom-Json
+        $Delimiter = $Settings.CsvDelimiter
+        
+        if ([string]::IsNullOrWhiteSpace($Delimiter)) {
+            Throw "Le paramètre 'CsvDelimiter' est vide ou absent dans settings.json."
+        }
+        Write-Verbose "Délimiteur détecté : '$Delimiter'"
+    }
+    catch {
+        Throw "Erreur lors de la lecture de settings.json : $_"
     }
 
-    Write-Verbose "InputPath  : $InputPath"
-    Write-Verbose "OutputPath : $OutputPath"
-    Write-Verbose "MappingPath: $MappingPath"
-    Write-Verbose "Delimiter  : '$Delimiter'"
-
-    Assert-DirectoryExists -Path $InputPath  -Label 'Input'
-    Assert-DirectoryExists -Path $OutputPath -Label 'Output'
-
-    # --- Load mapping.csv ---
-    $Mapping = @{}
-    # On force le délimiteur ici aussi au cas où le mapping serait en CSV point-virgule
-    # Mais souvent mapping.csv est standard. Utilisons l'auto-détection ou virgule par défaut pour le mapping
-    # Note: Si ton mapping.csv utilise des points-virgules, change le delimiter ici.
-    Import-Csv -LiteralPath $MappingPath | ForEach-Object {
-        if ($null -eq $_) { return }
-        $Source = [string]$_.Source
-        $Target = [string]$_.Target
-
-        if ([string]::IsNullOrWhiteSpace($Source)) { return }
-        $Mapping[$Source] = $Target
+    # Lecture Mapping (CSV)
+    # Création d'une Hashtable pour lookup rapide (Source -> Target)
+    $MapRules = @{}
+    try {
+        # Array Forcing sur l'import du mapping
+        $MappingData = @(Import-Csv -Path $MappingPath -Delimiter ",") 
+        
+        foreach ($Rule in $MappingData) {
+            if (-not [string]::IsNullOrWhiteSpace($Rule.Source) -and -not [string]::IsNullOrWhiteSpace($Rule.Target)) {
+                $MapRules[$Rule.Source] = $Rule.Target
+            }
+        }
+        Write-Verbose "Règles de mapping chargées : $($MapRules.Count)"
+    }
+    catch {
+        Throw "Erreur lors de la lecture de mapping.csv : $_"
     }
 
-    # --- Process CSV files ---
-    $InputFiles = @(Get-ChildItem -LiteralPath $InputPath -File -Filter '*.csv')
-    
+    # -------------------------------------------------------------------------
+    # 3. TRAITEMENT DES FICHIERS (STREAMING)
+    # -------------------------------------------------------------------------
+    # Array Forcing sur la liste des fichiers
+    $InputFiles = @(Get-ChildItem -Path $InputDir -Filter "*.csv" -File)
+
     if ($InputFiles.Count -eq 0) {
-        Write-Warning "Aucun fichier .csv trouvé dans '$InputPath'."
+        Write-Warning "Aucun fichier CSV trouvé dans $InputDir."
         return
     }
 
     foreach ($File in $InputFiles) {
-        $InPath  = $File.FullName
-        $OutPath = Join-Path $OutputPath $File.Name
+        Write-Output "Traitement du fichier : $($File.Name)"
+        
+        $TempOutputPath = Join-Path -Path $OutputDir -ChildPath "$($File.BaseName).tmp"
+        $FinalOutputPath = Join-Path -Path $OutputDir -ChildPath "$($File.Name)"
 
-        Write-Verbose "Traitement: '$InPath'"
+        try {
+            # A. ANALYSE DES EN-TÊTES (PRE-FLIGHT CHECK)
+            # Lecture de la première ligne uniquement pour déterminer les headers sans charger le fichier
+            $HeaderLine = Get-Content -Path $File.FullName -TotalCount 1
+            if ([string]::IsNullOrWhiteSpace($HeaderLine)) {
+                Write-Warning "Fichier vide ou en-tête manquant : $($File.Name)"
+                continue
+            }
 
-        if ($WhatIf) {
-            Write-Verbose "WhatIf: SKIP '$InPath'"
-            continue
-        }
+            # Découpage des headers sources
+            # Note : On utilise le délimiteur configuré
+            $SourceHeaders = $HeaderLine -split $Delimiter
 
-        # Streaming transform avec Délimiteur
-        Import-Csv -LiteralPath $InPath -Delimiter $Delimiter |
-            ForEach-Object {
-                $UsedNames = @{}
-                $OutRow = [ordered]@{}
+            # B. CONSTRUCTION DE LA LOGIQUE DE SÉLECTION (COLLISION HANDLING)
+            $SelectProperties = @()
+            $UsedTargetNames = @{} # Compteur pour gérer les suffixes (Phone, Phone_2)
 
-                foreach ($Prop in $_.PSObject.Properties) {
-                    $SourceName = [string]$Prop.Name
-                    $TargetName = Get-ResolvedMappingTarget -Mapping $Mapping -SourceName $SourceName
-                    
-                    # Gestion collisions
-                    $UniqueTarget = Get-UniqueName -UsedNames $UsedNames -Candidate $TargetName
-                    
-                    $OutRow[$UniqueTarget] = $Prop.Value
+            foreach ($ColName in $SourceHeaders) {
+                # Nettoyage basique du nom de colonne (trim quotes éventuelles)
+                $CleanColName = $ColName.Trim('"').Trim()
+
+                # 1. Déterminer le nom cible (Mapping ou Original)
+                $TargetName = if ($MapRules.ContainsKey($CleanColName)) { 
+                    $MapRules[$CleanColName] 
+                } else { 
+                    $CleanColName 
                 }
 
-                [pscustomobject]$OutRow
-            } |
-            Export-Csv -LiteralPath $OutPath -NoTypeInformation -Encoding UTF8 -Delimiter $Delimiter
+                # 2. Gestion des doublons (Collision Strategy)
+                if ($UsedTargetNames.ContainsKey($TargetName)) {
+                    $UsedTargetNames[$TargetName]++
+                    $FinalName = "${TargetName}_$($UsedTargetNames[$TargetName])"
+                }
+                else {
+                    $UsedTargetNames[$TargetName] = 1
+                    $FinalName = $TargetName
+                }
 
-        Write-Verbose "OK -> '$OutPath'"
+                # 3. Création de la propriété calculée pour Select-Object
+                # On capture $CleanColName dans une closure pour l'utiliser dans le pipeline
+                $PropertyHash = @{
+                    Name       = $FinalName
+                    Expression = [scriptblock]::Create("`$_.'$CleanColName'")
+                }
+                $SelectProperties += $PropertyHash
+            }
+
+            # C. EXÉCUTION DU PIPELINE (STREAMING)
+            # Import -> Select (Renommage) -> Export (Temp)
+            Import-Csv -Path $File.FullName -Delimiter $Delimiter |
+                Select-Object -Property $SelectProperties |
+                Export-Csv -Path $TempOutputPath -Delimiter $Delimiter -NoTypeInformation -Encoding UTF8
+            
+            # D. ATOMICITÉ (RENAME)
+            if (Test-Path -Path $TempOutputPath) {
+                Move-Item -Path $TempOutputPath -Destination $FinalOutputPath -Force
+                Write-Verbose "Succès : $FinalOutputPath généré."
+            }
+        }
+        catch {
+            Write-Warning "Échec du traitement pour $($File.Name) : $_"
+            # Nettoyage fichier temporaire en cas d'erreur
+            if (Test-Path -Path $TempOutputPath) {
+                Remove-Item -Path $TempOutputPath -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
+
+    Write-Output "Traitement terminé avec succès."
 }
 catch {
-    Write-Error "Echec engine.ps1: $($_.Exception.Message)"
-    throw
+    Write-Error "Arrêt critique du moteur : $_"
+    exit 1
 }
