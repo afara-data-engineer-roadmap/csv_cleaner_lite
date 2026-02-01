@@ -126,4 +126,4 @@ Décision : Création d'un script tests/integration_tests.ps1 capable d'injecter
 
 Résultat : Validation du moteur en 2 secondes avant chaque commit, assurant une régression zéro.
 
-Licence : Usage Interne Uniquement. Contact Support : [Votre Nom/Équipe]
+Licence : Usage Interne Uniquement. 
