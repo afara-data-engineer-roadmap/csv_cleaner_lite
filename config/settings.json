@@ -1,0 +1,8 @@
+﻿{
+    "OutputFolder":  "data\\output",
+    "AppName":  "CSV Cleaner Lite - Prod",
+    "InputFolder":  "data\\input",
+    "Encoding":  "UTF8",
+    "CsvDelimiter":  ";",
+    "MappingFile":  "config\\mapping.csv"
+}

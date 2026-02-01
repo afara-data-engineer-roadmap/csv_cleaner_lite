@@ -1,0 +1,4 @@
+﻿Source,Target
+Client_Ref,ClientID
+Montant_HT,Amount
+Date_Facture,InvoiceDate

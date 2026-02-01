@@ -1,0 +1,18 @@
+﻿# --- 1. DATA (Sécurité & Poids) ---
+# On ignore tous les CSV de données
+data/input/*.csv
+data/output/*.csv
+data/output/*.tmp
+
+# ... Mais on garde la structure des dossiers (l'astuce du .gitkeep)
+!data/input/.gitkeep
+!data/output/.gitkeep
+
+# --- 2. RUNTIME (Logs & Temp) ---
+logs/*.log
+*.tmp
+
+# --- 3. OS & IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
